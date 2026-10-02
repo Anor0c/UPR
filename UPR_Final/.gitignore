@@ -35,11 +35,14 @@
 *.xcodeproj
 *.xcworkspace
 *.sln
+*.slnx
+*.sln.DotSettings.user
 *.suo
 *.opensdf
 *.sdf
 *.VC.db
 *.VC.opendb
+
 .vsconfig
 
 # Precompiled Assets
@@ -73,3 +76,6 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+#IDE  config folder
+/.idea
