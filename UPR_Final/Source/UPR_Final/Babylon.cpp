@@ -18,17 +18,17 @@ bool UBabylon::IsInEditor()
 	
 }
 
-TEnumAsByte<EDialogAbleCharacters> UBabylon::PlayableToDialogRunner(TEnumAsByte<EPlayableRunner> Playable)
+TEnumAsByte<EDialogAbleCharacters> UBabylon::PlayableToDialogRunner(EPlayableRunner Playable)
 {
 	switch (Playable)
 	{
-	case EPlayableRunner::Adler_Runner:
+	case EPlayableRunner::Adler:
 		return TEnumAsByte<EDialogAbleCharacters>(1);
-	case EPlayableRunner::DDos_Runner :
+	case EPlayableRunner::DDos :
 		return TEnumAsByte<EDialogAbleCharacters>(3);
-	case EPlayableRunner::Shred_Runner :
+	case EPlayableRunner::Shred :
 		return TEnumAsByte<EDialogAbleCharacters>(2);
-	case EPlayableRunner::Ikigai_Runner :
+	case EPlayableRunner::Ikigai :
 		return TEnumAsByte<EDialogAbleCharacters>(0);
 		default:
 			return TEnumAsByte<EDialogAbleCharacters>(0);

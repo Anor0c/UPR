@@ -8,22 +8,35 @@
 #include "BaseRunner.generated.h"
 
 
+
+
 UENUM(BlueprintType)
-enum ECapacityTypeInternal
+enum class ECapacityTypeInternal : uint8
 {
 	Horizontal = 0,
 	Vertical = 1,
-	Ultimate = 2
+	Ultimate = 2,
+	//ShortTrick = 3, 
+	//MediumTrick = 4,
+	//LongTrick = 5
 };
 
 UENUM(BlueprintType)
-enum EPlayableRunner
+enum class EPlayableRunner : uint8
 {
-	Adler_Runner = 0,
-	DDos_Runner =1,
-	Shred_Runner = 2,
-	Ikigai_Runner = 3
+	Adler = 0,
+	DDos =1,
+	Shred = 2,
+	Ikigai = 3
 };
+
+UENUM(BlueprintType)
+enum class EClimbHeight : uint8
+{
+	NoTraversal = 0,
+	Low = 1,
+	High = 2
+}; 
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCancelAllAbilitiesSignature);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnOutOfBoundsSignature);
@@ -58,7 +71,7 @@ public:
 #pragma endregion 
 
 	UPROPERTY(BlueprintReadOnly, EditAnywhere)
-	TEnumAsByte<EPlayableRunner> RunnerTypeEnum; 
+	EPlayableRunner RunnerTypeEnum; 
 #pragma region AbilitySystem
 protected :
 	//Composant Gameplay Ability System
@@ -89,7 +102,7 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "AbilityDelegates")
 	FOnAbilityLaunchedSignature OnAbilityLaunchedDelegate;
 	UFUNCTION(BlueprintCallable, Category = "AbilityDelegates")
-	virtual void OnAbilityLaunched(TEnumAsByte<ECapacityTypeInternal> LaunchedAbility);
+	virtual void OnAbilityLaunched(ECapacityTypeInternal LaunchedAbility);
 	
 	//Event Delegate permettant d'annuler toutes les Capacité et tricks (GameplayAbility) active a ce moment
 	UPROPERTY(BlueprintAssignable, Category = "AbilityDelegates")
@@ -106,7 +119,7 @@ public:
 		virtual void CancelSpecific(ECapacityTypeInternal CapacityToCancel);	
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "BaseRunnerVar")
-		TMap<TEnumAsByte<ECapacityTypeInternal>, bool> CanAbility ;
+		TMap<ECapacityTypeInternal, bool> CanAbility ;
 	
 #pragma endregion
 
@@ -136,6 +149,14 @@ public :
 	UFUNCTION(BlueprintCallable, BlueprintImplementableEvent, Category = "Input")
 	void OnStopLookInput();
 #pragma endregion
+	
+#pragma region Traversal
+public : 
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	EClimbHeight ClimbHeight; 
+	UFUNCTION(BlueprintCallable, Category = "Traversal")
+	EClimbHeight TryClimb(FVector& OutPos); 
+#pragma endregion Traversal
 };
 
 

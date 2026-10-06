@@ -52,12 +52,19 @@ void ABaseRunner::CancelSpecific(ECapacityTypeInternal CapacityToCancel)
 	OnCancelSpecificAbilityDelegate.Broadcast(CapacityToCancel);
 }
 
+EClimbHeight ABaseRunner::TryClimb(FVector& OutPos)
+{
+	bool lastHitSet = false; 
+	//if ()
+	return EClimbHeight::NoTraversal; 
+}
+
 void ABaseRunner::OnOutOfBounds()
 {
 	OnOutOfBoundsDelegate.Broadcast();
 }
 
-void ABaseRunner::OnAbilityLaunched(TEnumAsByte<ECapacityTypeInternal> LaunchedAbility)
+void ABaseRunner::OnAbilityLaunched(ECapacityTypeInternal LaunchedAbility)
 {
 	OnAbilityLaunchedDelegate.Broadcast(LaunchedAbility, this);  
 }

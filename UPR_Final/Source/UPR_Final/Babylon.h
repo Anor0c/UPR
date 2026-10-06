@@ -30,7 +30,7 @@ public :
 
 	//Convertit de EPlayableCharacters a EDialogAbleCharacters
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Babylon")
-	static TEnumAsByte<EDialogAbleCharacters>PlayableToDialogRunner (TEnumAsByte<EPlayableRunner> Playable);
+	static TEnumAsByte<EDialogAbleCharacters>PlayableToDialogRunner (EPlayableRunner Playable);
 
 	//Trouve les nom des Runners dans un string
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Babylon")
