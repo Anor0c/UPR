@@ -86,6 +86,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCancelAllAbilitiesSignature);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnOutOfBoundsSignature);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCancelSpecificAbility, ECapacityTypeInternal, CapacityToCancel);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAbilityLaunchedSignature,ECapacityTypeInternal, LaunchedAbility,TSoftObjectPtr<ABaseRunner>, Runner );
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnComboUpdatedSignature, int32, CurrentCombo);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FExpectedSpeedUpdatedSignature, float, ExpectedSpeed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FExpectedAdrenalineUpdatedSignature, float, ExpectedAdrenaline);
 
 UCLASS()
 class UPR_FINAL_API ABaseRunner : public ACharacter, public IAbilitySystemInterface
@@ -113,9 +116,29 @@ public:
 	/*UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "CameraBoom")
 	class UAutoTargetSpringArm* AutoTargetCameraBoom;  */
 #pragma endregion 
+#pragma region Core
+	UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Core")
+	EPlayableRunner RunnerTypeEnum;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	int32 PlayerIndex = 0;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	float DefaultGravityScale = 1.75f; 
 
-	UPROPERTY(BlueprintReadOnly, EditAnywhere)
-	EPlayableRunner RunnerTypeEnum; 
+#pragma endregion
+#pragma region Camera
+public :
+	//Pendant un grind ou un wallrun, aligne progressivement la camera sur le yaw du mesh. Se rappelle a chaque tick jusqu'a la fin du lerp
+	UFUNCTION(BlueprintCallable, Category = "Camera")
+	void ResetCam();
+
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	bool CanMoveCamera = true;
+	//Progression du lerp de ResetCam, entre 0 et 1
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	float ResetCameraRotationAlpha = 0.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	float ResetCamSpeed = 1.5f;
+#pragma endregion Camera
 #pragma region AbilitySystem
 protected :
 	//Composant Gameplay Ability System
@@ -176,6 +199,11 @@ public :
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	FVector2D PlayerMoveInput;
 	
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Input")
+	bool JumpInputPressed = false; 
+	
+	
+	
 	UFUNCTION(BlueprintCallable, BlueprintImplementableEvent, Category = "Input")
 	 void OnMoveInput(FVector2D Input);
 
@@ -202,8 +230,15 @@ public :
 	UFUNCTION(BlueprintCallable, Category = "Traversal")
 	void PerformClimb(FVector LocationTarget, EClimbHeight InClimbHeight);
 	
-	
-	
+	//Detecte un mur a gauche et a droite du runner et lance le wallrun si un seul cote touche
+	UFUNCTION(BlueprintCallable, Category = "Traversal")
+	void TryWallRun();
+	//Colle le runner au mur tant qu'il detecte un mur et va assez vite. Se rappelle a chaque tick
+	UFUNCTION(BlueprintCallable, Category = "Traversal")
+	void PerformWallRun(EWallRunSide ConnectedSide, FHitResult InHit);
+	//finit le wall run
+	UFUNCTION(BlueprintCallable, Category = "Traversal")
+	void EndWallRun();
 	
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
 	EClimbHeight ClimbHeight; 
@@ -245,8 +280,41 @@ public :
 	double TraversalActionTimer = 0.0;
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
 	double MaxTraversalActionTimer = 1.0;
+	
+	
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
 	bool CanWallRun = true;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	FVector DetectBehind; 
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	FVector DetectForwards;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float WallRunCapsuleRadius = 50.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float WallRunCapsuleHalfHeight = 90.0f;
+	//Decalage lateral des capsules de detection du mur
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float CapsuleXYOffset = 20.0f;
+	//Multiplicateur du decalage lateral de la capsule de detection avant
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float WallRunForwardDetectOffest = 3.0f;
+	//Decalage vertical des capsules de detection du mur
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float CapsuleZOffset = 0.0f;
+	//Impulsion vers l'avant au debut du wallrun
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float WallJumpImpulse = 300.0f;
+	//Dernier hit du mur sur lequel le runner court
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	FHitResult WallRunInfo;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	bool JumpPossible = true;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	bool IsFalling = false;
+	//Delai avant de pouvoir refaire un wallrun apres en etre sorti
+	FTimerHandle WallRunCooldownHandle;
+
+	
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
 	bool CanMove = true;
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Debug")
@@ -254,6 +322,40 @@ public :
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Debug", meta = (DisplayName = "DEBUG DrawType"))
 	TEnumAsByte<EDrawDebugTrace::Type> DEBUGDrawType = EDrawDebugTrace::None;
 #pragma endregion Traversal
+
+#pragma region Tricks
+public :
+	//Incremente le combo, termine le trick en cours et broadcast ComboUpdated
+	UFUNCTION(BlueprintCallable, Category = "Tricks")
+	void IncrementCombo();
+	UFUNCTION(BlueprintCallable, Category = "Tricks")
+	void UpdateComboValues(float speedAdded, float adrenalineAdded); 
+	
+	
+	//Appelé a chaque fois que le combo de tricks change
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Tricks")
+	FOnComboUpdatedSignature ComboUpdated;
+	
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Tricks")
+	int32 TrickCombo = 0;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Tricks")
+	bool IsTricking = false;
+	
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Tricks")
+	float CurrentComboExpectedSpeedValue = 0.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Tricks")
+	float CurrentComboExpectedAdrenaline = 0.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Tricks")
+	float SpeedComboScaling = 1.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Tricks")
+	float AdrenalineComboScaling = 1.0f;
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Tricks")
+	FExpectedSpeedUpdatedSignature ExpectedSpeedUpdated;
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Tricks")
+	FExpectedAdrenalineUpdatedSignature ExpectedAdrenalineUpdated;
+
+	
+#pragma endregion Tricks
 };
 
 
