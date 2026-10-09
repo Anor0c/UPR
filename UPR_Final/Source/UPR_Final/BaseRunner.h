@@ -89,6 +89,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAbilityLaunchedSignature,ECapaci
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnComboUpdatedSignature, int32, CurrentCombo);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FExpectedSpeedUpdatedSignature, float, ExpectedSpeed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FExpectedAdrenalineUpdatedSignature, float, ExpectedAdrenaline);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGrindEndedSignature, AActor*, GrindRail);
 
 UCLASS()
 class UPR_FINAL_API ABaseRunner : public ACharacter, public IAbilitySystemInterface
@@ -122,7 +123,18 @@ public:
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
 	int32 PlayerIndex = 0;
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
-	float DefaultGravityScale = 1.75f; 
+	float DefaultGravityScale = 1.75f;
+
+	//Augmente FallingTime et applique la gravité lue dans GravityCurve. A appeler a chaque frame pendant la chute
+	UFUNCTION(BlueprintCallable, Category = "Core")
+	void GravityAcceleration();
+
+	//Temps passé en chute, utilisé comme abscisse de GravityCurve
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	double FallingTime = 0.0;
+	//GravityScale en fonction de FallingTime
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	TObjectPtr<class UCurveFloat> GravityCurve;
 
 #pragma endregion
 #pragma region Camera
@@ -138,6 +150,28 @@ public :
 	float ResetCameraRotationAlpha = 0.0f;
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
 	float ResetCamSpeed = 1.5f;
+
+	//Blend la longueur du bras et le FOV entre le palier de vitesse precedent et le palier actuel. A appeler a chaque frame pendant le blend
+	UFUNCTION(BlueprintCallable, Category = "Camera")
+	void SpeedCapCamera();
+
+	//Longueur du bras de camera pour chaque palier de vitesse
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	TArray<float> TargetArmLengthArray = {300.0f, 375.0f, 450.0f, 525.0f, 600.0f, 675.0f, 1200.0f};
+	//FOV de la camera pour chaque palier de vitesse
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	TArray<float> CameraFOVCaps = {106.0f, 106.0f, 108.0f, 110.0f, 112.0f, 114.0f, 120.0f};
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	int32 CurrentSpeedCapIndex = 0;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	int32 OldSpeedCapIndex = 0;
+	//Temps ecoulé depuis le debut du blend, utilisé directement comme alpha des lerps
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	float CurrentCameraBlendTime = 0.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	float MaxCameraBlendTime = 1.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Camera")
+	bool IsCameraBlending = false;
 #pragma endregion Camera
 #pragma region AbilitySystem
 protected :
@@ -322,6 +356,59 @@ public :
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Debug", meta = (DisplayName = "DEBUG DrawType"))
 	TEnumAsByte<EDrawDebugTrace::Type> DEBUGDrawType = EDrawDebugTrace::None;
 #pragma endregion Traversal
+
+#pragma region Grind
+public :
+	//Termine le grind en cours : relance le runner vers l'avant puis broadcast OnGrindEnded.
+	//L'override Blueprint coupe GrindFX et l'Audio
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Grind")
+	void EndGrind();
+	//Fait avancer le runner le long de la spline de RailToGrind et termine le grind au bout du rail. A appeler a chaque frame pendant le grind.
+	//L'override Blueprint gere l'Audio du grind
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Grind")
+	void PerformGrind();
+
+	//Appelé a la fin d'un grind, avec le rail qui vient d'etre quitté
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Grind")
+	FOnGrindEndedSignature OnGrindEnded;
+
+	//Rail sur lequel le runner grind
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	TObjectPtr<AActor> RailToGrind;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	float GrindSpeed = 100.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	bool CanAirDash = true;
+
+
+	//GrindSpeed en fonction de CurrentSpeedCap
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	TObjectPtr<class UCurveFloat> GrindSpeedCurve;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	float CurrentSpeedCap = 0.0f;
+	//Hauteur du runner au dessus de la spline, le long de son up vector
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	float GrindZOffset = 150.0f;
+	//Position du runner sur la spline du rail
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	float DistanceAlongSpline = 0.0f;
+	//Vrai si le runner avance dans le sens de la spline
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	bool IsFolllowingSplineDirection = true;
+
+	//Accroche le runner au rail, le place sur la spline et choisit le sens du grind selon la camera.
+	//L'override Blueprint gere GrindFX et l'Audio
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Grind")
+	void TryGrind(AActor* InRailToGrind);
+
+	//Point de la spline le plus proche du runner au debut du grind
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	FVector RunnerSplineLocation = FVector::ZeroVector;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	FRotator SplineRotationAtRunnerLocation = FRotator::ZeroRotator;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Grind")
+	float GrindCamBlendAmount = 0.0f;
+#pragma endregion Grind
 
 #pragma region Tricks
 public :

@@ -9,6 +9,9 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet/GameplayStatics.h"
+#include "Camera/CameraComponent.h"
+#include "Curves/CurveFloat.h"
+#include "Components/SplineComponent.h"
 
 
 // Sets default values
@@ -391,6 +394,149 @@ void ABaseRunner::ResetCam()
 	}
 
 	GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateUObject(this, &ABaseRunner::ResetCam));
+}
+
+void ABaseRunner::SpeedCapCamera()
+{
+	//Comme le node Get du Blueprint : un index invalide renvoie 0
+	auto GetCapValue = [](const TArray<float>& Caps, int32 Index)
+	{
+		return Caps.IsValidIndex(Index) ? Caps[Index] : 0.f;
+	};
+
+	//Les composants camera sont ajoutés dans le Blueprint
+	if (USpringArmComponent* CameraBoom = FindComponentByClass<UAutoTargetSpringArm>())
+	{
+		CameraBoom->TargetArmLength = FMath::Lerp(GetCapValue(TargetArmLengthArray, OldSpeedCapIndex),
+			GetCapValue(TargetArmLengthArray, CurrentSpeedCapIndex), CurrentCameraBlendTime);
+	}
+	if (UCameraComponent* Camera = FindComponentByClass<UCameraComponent>())
+	{
+		Camera->SetFieldOfView(FMath::Lerp(GetCapValue(CameraFOVCaps, OldSpeedCapIndex),
+			GetCapValue(CameraFOVCaps, CurrentSpeedCapIndex), CurrentCameraBlendTime));
+	}
+
+	CurrentCameraBlendTime += UGameplayStatics::GetWorldDeltaSeconds(this);
+	if (CurrentCameraBlendTime >= MaxCameraBlendTime)
+	{
+		IsCameraBlending = false;
+		CurrentCameraBlendTime = 0.f;
+	}
+}
+
+void ABaseRunner::GravityAcceleration()
+{
+	FallingTime += UGameplayStatics::GetWorldDeltaSeconds(this);
+	//Comme dans le Blueprint, une courbe non assignée donne une gravité de 0
+	GetCharacterMovement()->GravityScale = IsValid(GravityCurve) ? GravityCurve->GetFloatValue(FallingTime) : 0.f;
+}
+
+void ABaseRunner::EndGrind_Implementation()
+{
+	if (!IsValid(RailToGrind))
+	{
+		return;
+	}
+
+	UCharacterMovementComponent* RunnerMovement = GetCharacterMovement();
+	RunnerMovement->Velocity = FVector::ZeroVector;
+
+	RunnerMovement->AddImpulse(GetCapsuleComponent()->GetForwardVector() * GrindSpeed, true);
+	CanAirDash = true;
+	CanWallRun = true;
+	RunnerMovement->bUseControllerDesiredRotation = true;
+	IsGrinding = false;
+
+
+	OnGrindEnded.Broadcast(RailToGrind);
+	RailToGrind = nullptr;
+}
+
+void ABaseRunner::PerformGrind_Implementation()
+{
+	USplineComponent* RailSpline = IsValid(RailToGrind) ? RailToGrind->FindComponentByClass<USplineComponent>() : nullptr;
+	if (!RailSpline)
+	{
+		MovementMode = ERunnerMovementMode::Falling;
+		EndGrind();
+		return;
+	}
+
+	MovementMode = ERunnerMovementMode::Grinding;
+	//Comme dans le Blueprint, une courbe non assignée donne une vitesse de 0
+	GrindSpeed = IsValid(GrindSpeedCurve) ? GrindSpeedCurve->GetFloatValue(CurrentSpeedCap) : 0.f;
+
+	//Update Runner Location
+	const FVector RailLocation = RailSpline->GetLocationAtDistanceAlongSpline(DistanceAlongSpline, ESplineCoordinateSpace::World);
+	const FVector RailUp = RailSpline->GetUpVectorAtDistanceAlongSpline(DistanceAlongSpline, ESplineCoordinateSpace::World);
+	SetActorLocation(RailLocation + RailUp * GrindZOffset, true);
+
+	//Update Distance Along Grind et Update Rotation
+	const float DeltaSeconds = UGameplayStatics::GetWorldDeltaSeconds(this);
+	if (IsFolllowingSplineDirection)
+	{
+		DistanceAlongSpline += DeltaSeconds * GrindSpeed;
+		SetActorRotation(RailSpline->GetRotationAtDistanceAlongSpline(DistanceAlongSpline, ESplineCoordinateSpace::World));
+	}
+	else
+	{
+		DistanceAlongSpline += DeltaSeconds * -1.f * GrindSpeed;
+		FVector RailX, RailY, RailZ;
+		UKismetMathLibrary::BreakRotIntoAxes(RailSpline->GetRotationAtDistanceAlongSpline(DistanceAlongSpline, ESplineCoordinateSpace::World), RailX, RailY, RailZ);
+		//Demi-tour : le runner regarde dans le sens inverse de la spline
+		SetActorRotation(UKismetMathLibrary::MakeRotFromXY(-RailX, -RailY));
+	}
+
+	//End Grind
+	if (DistanceAlongSpline > RailSpline->GetSplineLength() || DistanceAlongSpline < 0.5f)
+	{
+		MovementMode = ERunnerMovementMode::Falling;
+		EndGrind();
+	}
+}
+
+void ABaseRunner::TryGrind_Implementation(AActor* InRailToGrind)
+{
+	USplineComponent* RailSpline = IsValid(InRailToGrind) ? InRailToGrind->FindComponentByClass<USplineComponent>() : nullptr;
+	if (!RailSpline)
+	{
+		EndGrind();
+		return;
+	}
+
+	//Place le runner sur la spline
+	RailToGrind = InRailToGrind;
+	RunnerSplineLocation = RailSpline->FindLocationClosestToWorldLocation(GetActorLocation(), ESplineCoordinateSpace::World);
+	//Comme dans le Blueprint : rotation au debut de la spline, en espace local
+	SplineRotationAtRunnerLocation = RailSpline->GetRotationAtDistanceAlongSpline(0.f, ESplineCoordinateSpace::Local);
+	DistanceAlongSpline = RailSpline->GetDistanceAlongSplineAtLocation(RunnerSplineLocation, ESplineCoordinateSpace::World);
+	MovementMode = ERunnerMovementMode::Grinding;
+
+	AttachToActor(RailToGrind, FAttachmentTransformRules::KeepWorldTransform);
+
+	//Le sens du grind suit la direction de la camera par rapport a la spline
+	const USceneComponent* CameraBoom = FindComponentByClass<UAutoTargetSpringArm>();
+	const FVector CameraDirection = CameraBoom ? CameraBoom->GetComponentRotation().Vector() : FVector::ZeroVector;
+	const FVector SplineDirection = RailSpline->GetRotationAtDistanceAlongSpline(DistanceAlongSpline, ESplineCoordinateSpace::World).Vector();
+	//Comme dans le Blueprint, divisé par la somme des normes et non leur produit. Seul le signe est utilisé
+	const double PlayerRotationDotProduct = FVector::DotProduct(CameraDirection, SplineDirection) / (CameraDirection.Size() + SplineDirection.Size());
+	IsFolllowingSplineDirection = PlayerRotationDotProduct >= 0.0;
+
+	CanWallRun = false;
+	GrindCamBlendAmount = 0.f;
+	IsGrinding = true;
+	UpdateComboValues(5.f, 0.f);
+
+	//IsVertical est une variable de BP_GrindRailBase, lue par réflexion
+	const FBoolProperty* IsVerticalProperty = FindFProperty<FBoolProperty>(RailToGrind->GetClass(), TEXT("IsVertical"));
+	if (IsVerticalProperty && IsVerticalProperty->GetPropertyValue_InContainer(RailToGrind))
+	{
+		IsFolllowingSplineDirection = true;
+	}
+	else
+	{
+		ResetCam();
+	}
 }
 
 void ABaseRunner::IncrementCombo()
