@@ -90,6 +90,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnComboUpdatedSignature, int32, Cur
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FExpectedSpeedUpdatedSignature, float, ExpectedSpeed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FExpectedAdrenalineUpdatedSignature, float, ExpectedAdrenaline);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGrindEndedSignature, AActor*, GrindRail);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpeedValueUpdatedSignature, float, SpeedValue);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBoussoleUpdatedSignature);
 
 UCLASS()
 class UPR_FINAL_API ABaseRunner : public ACharacter, public IAbilitySystemInterface
@@ -110,6 +112,8 @@ public:
 	
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;
+	//Partie du Tick executée quand le runner n'est pas au sol : chute, gravité, climb et wallrun
+	void TickInAir(class UCharacterMovementComponent* RunnerMovement);
 
 	// Called to bind functionality to input
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
@@ -135,6 +139,62 @@ public:
 	//GravityScale en fonction de FallingTime
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
 	TObjectPtr<class UCurveFloat> GravityCurve;
+
+	//Vrai si le runner etait au sol a la frame precedente
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	bool WasGroundLastFrame = false;
+	//Derniere position au sol avant de quitter le sol
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	FVector LastGroundPosition = FVector::ZeroVector;
+	//Classe du composant de flottement (BPC_FloatingComponent). Tant qu'il flotte, la gravité n'accelere pas
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	TSubclassOf<UActorComponent> FloatingComponentClass;
+
+	//Vitesse accumulée par le runner, diminue a chaque frame de DeltaSeconds * SpeedDecayMultiplayer
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	float SpeedValue = 0.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	float SpeedDecayMultiplayer = 1.0f;
+	//Appelé a chaque frame avec la nouvelle SpeedValue
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Core")
+	FSpeedValueUpdatedSignature SpeedValueUpdated;
+
+	//Runner suspendu : gravité et vitesse a 0, ne peut plus bouger
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	bool IsSuspended = false;
+
+	//Yaw relatif visé par le mesh en course, selon l'input du joueur
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	float MeshRotationTarget = 0.0f;
+	//Alpha du lerp entre le yaw actuel du mesh et MeshRotationTarget
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	float MeshRotationAlpha = 0.0f;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	float MeshRotationSpeed = 3.0f;
+
+	//Paliers de vitesse (MaxWalkSpeed)
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	TArray<float> SpeedCapsArray = {150.0f, 1750.0f, 2000.0f, 2250.0f, 2500.0f, 2750.0f, 3000.0f};
+	//Index de palier utilisé au BeginPlay pour la vitesse, la longueur du bras de camera et le FOV
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	int32 StartingIndex = 0;
+	//Combo -> valeur associée. Clés et valeurs sont recopiées au BeginPlay dans SpeedCapUnloccked et SpeedValueToNextCap
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	TMap<int32, int32> ComboMap = {{2, 10},{3, 20},{4, 30},{5, 50},{6, 80},{7, 100},{0, 999}};
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	TArray<int32> SpeedCapUnloccked;
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Core")
+	TArray<int32> SpeedValueToNextCap = {10,30,65,100,150,200,999};
+
+	//Appelées au BeginPlay. Corps C++ vides, a surcharger en Blueprint
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Core")
+	void OnSpeedCapPassed(int32 NewSpeedCapIndex);
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Core")
+	void UpdateAdrenaline(float DeltaAdrenaline);
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Core")
+	void BeginPlayAssignEventDispatcher();
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Core")
+	void OnStartCountDown();
 
 #pragma endregion
 #pragma region Camera
@@ -189,8 +249,11 @@ protected :
    	UPROPERTY(EditAnywhere, BlueprintReadOnly, Transient, Category = "GameplayAbilitySystem", meta = (AllowPrivateAccess = "true"))
    	const class URunnerAttributeSet* RunnerAttributeSet;
 
-	
+
 public:
+	//Abilities données au runner au BeginPlay. L'index dans le tableau sert d'InputID
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "GameplayAbilitySystem")
+	TArray<TSubclassOf<class UGameplayAbility>> RunnerMoveset;
 
 	//Event Delegate permettant d'annuler toutes les Capacité et tricks (GameplayAbility) active a ce moment
 	UPROPERTY(BlueprintAssignable, Category = "AbilityDelegates")
@@ -318,6 +381,9 @@ public :
 	
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
 	bool CanWallRun = true;
+	//Temps de wallrun restant. Quand il atteint 0, CanWallRun passe a false
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
+	float WallRunCurrentTime = 0.0f;
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
 	FVector DetectBehind; 
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Traversal")
@@ -443,6 +509,39 @@ public :
 
 	
 #pragma endregion Tricks
+
+#pragma region PostProcess
+public :
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "PostProcess")
+	void UpdatePostProcess();
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "PostProcess")
+	void InitPostProcess();
+#pragma endregion PostProcess
+
+#pragma region Race
+public :
+	//BP_RaceManager de la course. Son composant spline sert de tracé de la course
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Race")
+	TObjectPtr<AActor> RaceManagerRef;
+	//Distance du runner le long de la spline de course
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Race")
+	float DistanceAlongRace = 0.0f;
+	//Avance de l'objectif sur la spline par rapport a DistanceAlongRace
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Race")
+	float GoalLocationOffset = 3000.0f;
+	//Vrai si la course se fait dans le sens inverse de la spline
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Race")
+	bool IsRetour = false;
+	//Point de la spline vers lequel pointe la boussole
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Race")
+	FVector GoalLocation = FVector::ZeroVector;
+	//Rotation du runner vers GoalLocation
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Race")
+	FRotator LookAtGoal = FRotator::ZeroRotator;
+	//Appelé a chaque frame apres la mise a jour de GoalLocation et LookAtGoal
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Race")
+	FBoussoleUpdatedSignature BoussoleUpdated;
+#pragma endregion Race
 };
 
 

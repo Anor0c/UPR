@@ -12,6 +12,11 @@
 #include "Camera/CameraComponent.h"
 #include "Curves/CurveFloat.h"
 #include "Components/SplineComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/AudioComponent.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "Abilities/GameplayAbility.h"
+#include "Babylon.h"
 
 
 // Sets default values
@@ -39,6 +44,96 @@ void ABaseRunner::BeginPlay()
 
 	Super::BeginPlay();
 
+	//Init Gameplay Ability System : chaque ability du moveset est donnée avec son index comme InputID
+	if (IsValid(RunnerAttributeSet) && IsValid(GASComponent))
+	{
+		for (int32 AbilityIndex = 0; AbilityIndex < RunnerMoveset.Num(); ++AbilityIndex)
+		{
+			GASComponent->GiveAbility(FGameplayAbilitySpec(RunnerMoveset[AbilityIndex], 0, AbilityIndex));
+		}
+	}
+	else
+	{
+		UKismetSystemLibrary::PrintString(this, UKismetSystemLibrary::GetDisplayName(this) + TEXT("GAS COMPONENT NULL REFERENCE "),
+			true, true, FLinearColor(1.0f, 0.0f, 0.039216f), 10.0f);
+	}
+
+	//Cache Base Variables : vitesse, camera et FOV du palier de depart
+	auto GetCapValue = [](const TArray<float>& Caps, int32 Index)
+	{
+		return Caps.IsValidIndex(Index) ? Caps[Index] : 0.f;
+	};
+	CurrentSpeedCap = GetCapValue(SpeedCapsArray, StartingIndex);
+	GetCharacterMovement()->MaxWalkSpeed = CurrentSpeedCap;
+	MovementMode = ERunnerMovementMode::Idle;
+	//Les composants camera sont ajoutés dans le Blueprint
+	if (USpringArmComponent* CameraBoom = FindComponentByClass<UAutoTargetSpringArm>())
+	{
+		CameraBoom->TargetArmLength = GetCapValue(TargetArmLengthArray, StartingIndex);
+	}
+	if (UCameraComponent* Camera = FindComponentByClass<UCameraComponent>())
+	{
+		Camera->SetFieldOfView(GetCapValue(CameraFOVCaps, StartingIndex));
+	}
+	OnSpeedCapPassed(1);
+	UpdateAdrenaline(0.0f);
+
+	//Recopie les combos de ComboMap
+	ComboMap.GenerateKeyArray(SpeedCapUnloccked);
+	TArray<int32> ComboValues;
+	ComboMap.GenerateValueArray(ComboValues);
+	//Equivalent du noeud Set Array Elem avec Size To Fit
+	auto SetSizeToFit = [this](int32 Index, int32 Item)
+	{
+		if (Index < 0) { return; }
+		if (Index >= SpeedValueToNextCap.Num()) { SpeedValueToNextCap.SetNum(Index + 1); }
+		SpeedValueToNextCap[Index] = Item;
+	};
+	for (int32 ComboIndex = 0; ComboIndex < ComboValues.Num(); ++ComboIndex)
+	{
+		if (ComboValues.IsValidIndex(ComboIndex - 1))
+		{
+			SetSizeToFit(ComboValues[ComboIndex] + ComboValues[ComboIndex - 1], ComboIndex);
+		}
+		else
+		{
+			SetSizeToFit(ComboIndex, ComboValues[ComboIndex]);
+		}
+	}
+	InitPostProcess();
+
+	//Event dispatchers et compte a rebours
+	BeginPlayAssignEventDispatcher();
+	OnStartCountDown();
+	//MaxSpeedSound est un composant ajouté dans le Blueprint, retrouvé par son nom
+	TArray<UAudioComponent*> AudioComponents;
+	GetComponents<UAudioComponent>(AudioComponents);
+	for (UAudioComponent* AudioComponent : AudioComponents)
+	{
+		if (AudioComponent->GetFName() == TEXT("MaxSpeedSound"))
+		{
+			AudioComponent->Stop();
+		}
+	}
+
+	//Les traces de debug ne sont dessinées que dans l'editeur
+	DEBUGDrawType = UBabylon::IsInEditor() ? EDrawDebugTrace::ForOneFrame : EDrawDebugTrace::None;
+}
+
+void ABaseRunner::OnSpeedCapPassed_Implementation(int32 NewSpeedCapIndex)
+{
+}
+
+void ABaseRunner::UpdateAdrenaline_Implementation(float DeltaAdrenaline)
+{
+}
+
+void ABaseRunner::BeginPlayAssignEventDispatcher_Implementation()
+{
+}
+
+void ABaseRunner::OnStartCountDown_Implementation()
+{
 }
 
 // Called every frame
@@ -46,6 +141,143 @@ void ABaseRunner::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	UCharacterMovementComponent* RunnerMovement = GetCharacterMovement();
+
+	//Etat au sol / en l'air
+	if (RunnerMovement->IsMovingOnGround())
+	{
+		//Au sol : Running ou Idle selon la vitesse horizontale
+		MovementMode = FVector2D(RunnerMovement->Velocity.X, RunnerMovement->Velocity.Y).Size() > 5.0
+			? ERunnerMovementMode::Running
+			: ERunnerMovementMode::Idle;
+	}
+	else
+	{
+		TickInAir(RunnerMovement);
+	}
+
+	//Wallrun : le saut et l'air dash restent possibles, et le wallrun est limité dans le temps
+	if (IsWallRunning)
+	{
+		JumpPossible = true;
+		CanAirDash = true;
+		WallRunCurrentTime -= UGameplayStatics::GetWorldDeltaSeconds(this);
+		if (WallRunCurrentTime <= 0.f)
+		{
+			CanWallRun = false;
+		}
+	}
+	if (IsGrinding)
+	{
+		PerformGrind();
+	}
+
+	//Diminution de la vitesse accumulée
+	SpeedValue = FMath::Clamp(SpeedValue - UGameplayStatics::GetWorldDeltaSeconds(this) * SpeedDecayMultiplayer, 0.0f, 99999.0f);
+	SpeedValueUpdated.Broadcast(SpeedValue);
+
+	//Suspension (REVOIR SUSPENDED SYSTEM)
+	if (IsSuspended)
+	{
+		RunnerMovement->GravityScale = 0.0f;
+		RunnerMovement->Velocity = FVector::ZeroVector;
+		CanMove = false;
+	}
+	//blend cam 
+	if (IsCameraBlending)
+	{
+		SpeedCapCamera();
+	}
+
+	//Boussole : objectif a GoalLocationOffset devant le runner sur la spline de course (derriere si IsRetour)
+	if (RaceManagerRef)
+	{
+		if (USplineComponent* RaceSpline = RaceManagerRef->FindComponentByClass<USplineComponent>())
+		{
+			const float GoalDistance = IsRetour ? DistanceAlongRace - GoalLocationOffset : DistanceAlongRace + GoalLocationOffset;
+			GoalLocation = RaceSpline->GetLocationAtDistanceAlongSpline(FMath::Clamp(GoalDistance, 0.0f, RaceSpline->GetSplineLength()), ESplineCoordinateSpace::World);
+			LookAtGoal = UKismetMathLibrary::FindLookAtRotation(GetActorLocation(), GoalLocation);
+			BoussoleUpdated.Broadcast();
+		}
+	}
+
+	UpdatePostProcess();
+
+	//Rotation du mesh : en course, il s'oriente selon l'input, sinon il revient a -90
+	USkeletalMeshComponent* RunnerMesh = GetMesh();
+	if (MovementMode == ERunnerMovementMode::Running)
+	{
+		const bool bInputTurning = PlayerMoveInput.Y <= 0.1 && !PlayerMoveInput.IsZero();
+		MeshRotationTarget = bInputTurning ? PlayerMoveInput.X * -90.0f + 90.0f : -90.0f;
+
+		const FRotator MeshRelativeRotation = RunnerMesh->GetRelativeRotation();
+		if (FMath::IsNearlyEqual(MeshRotationTarget, MeshRelativeRotation.Yaw, 0.1f))
+		{
+			MeshRotationAlpha = 0.0f;
+		}
+		else
+		{
+			//Plus le mesh est deja aligné sur la cible, plus l'alpha monte vite
+			const float Alignment = FVector::DotProduct(FRotator(0.0f, MeshRotationTarget, 0.0f).Vector(), MeshRelativeRotation.Vector());
+			const float AlphaStep = FMath::Clamp(UGameplayStatics::GetWorldDeltaSeconds(this) * MeshRotationSpeed + Alignment * 0.01f, 0.01f, 1.0f);
+			MeshRotationAlpha = FMath::Clamp(AlphaStep + MeshRotationAlpha, 0.0f, 1.0f);
+		}
+
+		const FRotator NewMeshRotation = UKismetMathLibrary::RLerp(FRotator(0.0f, MeshRelativeRotation.Yaw, 0.0f), FRotator(0.0f, MeshRotationTarget, 0.0f), MeshRotationAlpha, true);
+		RunnerMesh->SetRelativeRotation(NewMeshRotation, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+	else
+	{
+		RunnerMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f), false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
+void ABaseRunner::TickInAir(UCharacterMovementComponent* RunnerMovement)
+{
+	JumpPossible = false;
+
+	if ((MovementMode == ERunnerMovementMode::Running || MovementMode == ERunnerMovementMode::Idle) && MovementMode != ERunnerMovementMode::Grinding)
+	{
+		MovementMode = ERunnerMovementMode::Falling;
+	}
+
+	if (WasGroundLastFrame)
+	{
+		LastGroundPosition = RunnerMovement->GetLastUpdateLocation();
+		WasGroundLastFrame = false;
+	}
+
+	if (RunnerMovement->Velocity.Z < 0.0)
+	{
+		IsFalling = true;
+	}
+
+	if (IsFalling)
+	{
+		//Pas d'acceleration de la gravité tant que le composant de flottement flotte. IsFloating est une variable Blueprint, lue par réflexion
+		const UActorComponent* FloatingComponent = FloatingComponentClass ? FindComponentByClass(FloatingComponentClass) : nullptr;
+		const FBoolProperty* IsFloatingProperty = FloatingComponent ? FindFProperty<FBoolProperty>(FloatingComponent->GetClass(), TEXT("IsFloating")) : nullptr;
+		const bool IsFloating = IsFloatingProperty && IsFloatingProperty->GetPropertyValue_InContainer(FloatingComponent);
+		if (!IsFloating)
+		{
+			GravityAcceleration();
+		}
+	}
+
+	FVector ClimbTarget;
+	const EClimbHeight ClimbResult = TryClimb(ClimbTarget);
+	if (ClimbResult != EClimbHeight::NoTraversal)
+	{
+		PerformClimb(ClimbTarget, ClimbResult);
+	}
+	else if (CanWallRun && !IsWallRunning)
+	{
+		TryWallRun();
+	}
+	else
+	{
+		EndWallRun();
+	}
 }
 
 // Called to bind functionality to input
@@ -572,6 +804,14 @@ void ABaseRunner::OnAbilityLaunched(ECapacityTypeInternal LaunchedAbility)
 void ABaseRunner::CancelAllAbility()
 {
 	OnCancelAllAbilitiesDelegate.Broadcast();
+}
+
+void ABaseRunner::UpdatePostProcess_Implementation()
+{
+}
+
+void ABaseRunner::InitPostProcess_Implementation()
+{
 }
 
 
